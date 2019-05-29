@@ -710,7 +710,7 @@ def export():
         if not os.path.isdir(FLAGS.export_dir):
             os.makedirs(FLAGS.export_dir)
 
-        def do_graph_freeze(output_file=None, output_node_names=None, variables_blacklist=None):
+        def do_graph_freeze(output_file=None, output_node_names=None, variables_blacklist=''):
             return freeze_graph.freeze_graph_with_def_protos(
                 input_graph_def=tf.get_default_graph().as_graph_def(),
                 input_saver_def=saver.as_saver_def(),
@@ -740,7 +740,7 @@ def export():
             with open(output_graph_path, 'wb') as fout:
                 fout.write(frozen_graph.SerializeToString())
         else:
-            frozen_graph = do_graph_freeze(output_node_names=output_names, variables_blacklist='')
+            frozen_graph = do_graph_freeze(output_node_names=output_names)
             output_tflite_path = os.path.join(FLAGS.export_dir, output_filename.replace('.pb', '.tflite'))
 
             converter = tf.lite.TFLiteConverter(frozen_graph, input_tensors=inputs.values(), output_tensors=outputs.values())
@@ -752,7 +752,27 @@ def export():
             with open(output_tflite_path, 'wb') as fout:
                 fout.write(tflite_model)
 
-            log_info('Exported model for TF Lite engine as {}'.format(os.path.basename(output_tflite_path)))
+            log_info('Exported model for TFLite engine as {}'.format(os.path.basename(output_tflite_path)))
+
+            if FLAGS.export_mfcc_subgraph:
+                graph = tf.Graph()
+                with graph.as_default():
+                    # Create feature computation graph
+                    input_samples = tf.placeholder(tf.float32, [Config.audio_window_samples], 'input_samples')
+                    samples = tf.expand_dims(input_samples, -1)
+                    mfccs, _ = samples_to_mfccs(samples, FLAGS.audio_sample_rate)
+                    mfccs = tf.identity(mfccs, name='mfccs')
+
+                    output_tflite_path = os.path.join(FLAGS.export_dir, 'mfcc_subgraph.tflite')
+
+                    converter = tf.lite.TFLiteConverter(graph.as_graph_def(), input_tensors=[input_samples], output_tensors=[mfccs])
+                    converter.allow_custom_ops = True
+                    tflite_model = converter.convert()
+
+                    with open(output_tflite_path, 'wb') as fout:
+                        fout.write(tflite_model)
+
+                    log_info('Exported MFCC subgraph for TFLite engine as {}'.format(os.path.basename(output_tflite_path)))
 
         log_info('Models exported at %s' % (FLAGS.export_dir))
     except RuntimeError as e:

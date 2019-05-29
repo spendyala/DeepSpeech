@@ -22,6 +22,7 @@
 #else // USE_TFLITE
   #include "tensorflow/lite/model.h"
   #include "tensorflow/lite/kernels/register.h"
+  #include "mfcc_subgraph_tflite.h"
 #endif // USE_TFLITE
 
 #include "ctcdecode/ctc_beam_search_decoder.h"
@@ -106,7 +107,9 @@ struct ModelState {
   GraphDef graph_def;
 #else // USE_TFLITE
   std::unique_ptr<Interpreter> interpreter;
+  std::unique_ptr<Interpreter> mfcc_interp;
   std::unique_ptr<FlatBufferModel> fbmodel;
+  std::unique_ptr<FlatBufferModel> mfcc_fbmodel;
 #endif // USE_TFLITE
   unsigned int ncep;
   unsigned int ncontext;
@@ -188,7 +191,9 @@ ModelState::ModelState()
   , session(nullptr)
 #else // USE_TFLITE
     interpreter(nullptr)
+  , mfcc_interp(nullptr)
   , fbmodel(nullptr)
+  , mfcc_fbmodel(nullptr)
 #endif // USE_TFLITE
   , ncep(0)
   , ncontext(0)
@@ -496,12 +501,12 @@ ModelState::compute_mfcc(const vector<float>& samples, vector<float>& mfcc_outpu
   }
 #else
   // Feeding input_node
-  float* input_samples = interpreter->typed_tensor<float>(input_samples_idx);
+  float* input_samples = mfcc_interp->typed_tensor<float>(input_samples_idx);
   for (int i = 0; i < samples.size(); ++i) {
     input_samples[i] = samples[i];
   }
 
-  TfLiteStatus status = interpreter->Invoke();
+  TfLiteStatus status = mfcc_interp->Invoke();
   if (status != kTfLiteOk) {
     std::cerr << "Error running session: " << status << "\n";
     return;
@@ -509,14 +514,14 @@ ModelState::compute_mfcc(const vector<float>& samples, vector<float>& mfcc_outpu
 
   // The feature computation graph is hardcoded to one audio length for now
   int n_windows = 1;
-  TfLiteIntArray* out_dims = interpreter->tensor(mfccs_idx)->dims;
+  TfLiteIntArray* out_dims = mfcc_interp->tensor(mfccs_idx)->dims;
   int num_elements = 1;
   for (int i = 0; i < out_dims->size; ++i) {
     num_elements *= out_dims->data[i];
   }
   assert(num_elements / n_features == n_windows);
 
-  float* outputs = interpreter->typed_tensor<float>(mfccs_idx);
+  float* outputs = mfcc_interp->typed_tensor<float>(mfccs_idx);
   for (int i = 0; i < n_windows * n_features; ++i) {
     mfcc_output.push_back(outputs[i]);
   }
@@ -566,12 +571,12 @@ ModelState::decode_metadata()
 
 #ifdef USE_TFLITE
 int
-tflite_get_tensor_by_name(const ModelState* ctx, const vector<int>& list, const char* name)
+tflite_get_tensor_by_name(const Interpreter* interpreter, const vector<int>& list, const char* name)
 {
   int rv = -1;
 
   for (int i = 0; i < list.size(); ++i) {
-    const string& node_name = ctx->interpreter->tensor(list[i])->name;
+    const string& node_name = interpreter->tensor(list[i])->name;
     if (node_name.compare(string(name)) == 0) {
       rv = i;
     }
@@ -582,15 +587,15 @@ tflite_get_tensor_by_name(const ModelState* ctx, const vector<int>& list, const 
 }
 
 int
-tflite_get_input_tensor_by_name(const ModelState* ctx, const char* name)
+tflite_get_input_tensor_by_name(const Interpreter* interpreter, const char* name)
 {
-  return ctx->interpreter->inputs()[tflite_get_tensor_by_name(ctx, ctx->interpreter->inputs(), name)];
+  return interpreter->inputs()[tflite_get_tensor_by_name(interpreter, interpreter->inputs(), name)];
 }
 
 int
-tflite_get_output_tensor_by_name(const ModelState* ctx, const char* name)
+tflite_get_output_tensor_by_name(const Interpreter* interpreter, const char* name)
 {
-  return ctx->interpreter->outputs()[tflite_get_tensor_by_name(ctx, ctx->interpreter->outputs(), name)];
+  return interpreter->outputs()[tflite_get_tensor_by_name(interpreter, interpreter->outputs(), name)];
 }
 #endif
 
@@ -725,6 +730,11 @@ DS_CreateModel(const char* aModelPath,
     return DS_ERR_FAIL_INIT_MMAP;
   }
 
+  model->mfcc_fbmodel = tflite::FlatBufferModel::BuildFromBuffer(reinterpret_cast<char*>(mfcc_subgraph_tflite), mfcc_subgraph_tflite_len);
+  if (!model->mfcc_fbmodel) {
+    std::cerr << "Error when initializing MFCC model" << std::endl;
+    return DS_ERR_FAIL_INIT_MFCC_SUBGRAPH;
+  }
 
   tflite::ops::builtin::BuiltinOpResolver resolver;
   tflite::InterpreterBuilder(*model->fbmodel, resolver)(&model->interpreter);
@@ -736,15 +746,24 @@ DS_CreateModel(const char* aModelPath,
   model->interpreter->AllocateTensors();
   model->interpreter->SetNumThreads(4);
 
+  tflite::InterpreterBuilder(*model->mfcc_fbmodel, resolver)(&model->mfcc_interp);
+  if (!model->mfcc_interp) {
+    std::cerr << "Error at InterpreterBuilder for MFCC model" << std::endl;
+    return DS_ERR_FAIL_INTERPRETER;
+  }
+
+  model->mfcc_interp->AllocateTensors();
+
   // Query all the index once
-  model->input_node_idx       = tflite_get_input_tensor_by_name(model.get(), "input_node");
-  model->previous_state_c_idx = tflite_get_input_tensor_by_name(model.get(), "previous_state_c");
-  model->previous_state_h_idx = tflite_get_input_tensor_by_name(model.get(), "previous_state_h");
-  model->input_samples_idx    = tflite_get_input_tensor_by_name(model.get(), "input_samples");
-  model->logits_idx           = tflite_get_output_tensor_by_name(model.get(), "logits");
-  model->new_state_c_idx      = tflite_get_output_tensor_by_name(model.get(), "new_state_c");
-  model->new_state_h_idx      = tflite_get_output_tensor_by_name(model.get(), "new_state_h");
-  model->mfccs_idx            = tflite_get_output_tensor_by_name(model.get(), "mfccs");
+  model->input_node_idx       = tflite_get_input_tensor_by_name(model->interpreter.get(), "input_node");
+  model->previous_state_c_idx = tflite_get_input_tensor_by_name(model->interpreter.get(), "previous_state_c");
+  model->previous_state_h_idx = tflite_get_input_tensor_by_name(model->interpreter.get(), "previous_state_h");
+  model->logits_idx           = tflite_get_output_tensor_by_name(model->interpreter.get(), "logits");
+  model->new_state_c_idx      = tflite_get_output_tensor_by_name(model->interpreter.get(), "new_state_c");
+  model->new_state_h_idx      = tflite_get_output_tensor_by_name(model->interpreter.get(), "new_state_h");
+
+  model->input_samples_idx    = tflite_get_input_tensor_by_name(model->mfcc_interp.get(), "input_samples");
+  model->mfccs_idx            = tflite_get_output_tensor_by_name(model->mfcc_interp.get(), "mfccs");
 
   TfLiteIntArray* dims_input_node = model->interpreter->tensor(model->input_node_idx)->dims;
 

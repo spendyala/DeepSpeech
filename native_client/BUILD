@@ -71,7 +71,8 @@ tf_cc_shared_object(
             "deepspeech.h",
             "alphabet.h",
             "ds_version.h",
-            "ds_graph_version.h"] +
+            "ds_graph_version.h",
+            "mfcc_subgraph_tflite.h"] +
             DECODER_SOURCES,
     copts = select({ 
         # -fvisibility=hidden is not required on Windows, MSCV hides all declarations by default

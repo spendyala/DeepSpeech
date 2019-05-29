@@ -68,6 +68,7 @@ disable=missing-docstring,
         import-error,
         no-name-in-module,
         no-member,
+        not-context-manager,
         unsubscriptable-object,
         print-statement,
         parameter-unpacking,
@@ -243,7 +244,7 @@ notes=FIXME,
 # List of decorators that produce context managers, such as
 # contextlib.contextmanager. Add to this list to register other decorators that
 # produce valid context managers.
-contextmanager-decorators=contextlib.contextmanager
+contextmanager-decorators=contextlib.contextmanager,tf_contextlib.contextmanager
 
 # List of members which are set dynamically and missed by pylint inference
 # system, and so shouldn't trigger E1101 when accessed. Python regular
